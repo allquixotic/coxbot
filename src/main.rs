@@ -29,12 +29,20 @@ use tiberius::BoxableIo;
 
 use std::thread;
 use std::time::Duration;
+use std::sync::atomic::Ordering::*;
+use std::sync::RwLock;
+use std::sync::RwLockReadGuard;
+use std::sync::RwLockWriteGuard;
+use std::sync::LockResult;
+use std::sync::atomic::AtomicBool;
 
 lazy_static! {
     static ref SQLCONN : String = ::std::env::var("SQLCONN").expect("Could not obtain SQLCONN").to_string();
     static ref CHANNEL : String = ::std::env::var("CHANNEL").expect("Could not obtain CHANNEL").to_string();
     static ref DISCORD_TOKEN : String = ::std::env::var("DISCORD_TOKEN").expect("Could not obtain DISCORD_TOKEN").to_string();
     static ref USERID_STR : String = ::std::env::var("USER_ID").expect("Could not obtain USER_ID").to_string();
+    static ref RDY : RwLock<Option<Ready>> = RwLock::new(None);
+    static ref THR : AtomicBool = AtomicBool::new(false);
 }
 
 
@@ -49,63 +57,94 @@ fn new_sql() -> SqlConnection<Box<dyn BoxableIo>> {
 pub struct Handler;
 
 impl EventHandler for Handler {
-  fn ready(&self, _: Context, ready: Ready) {
-    println!("{} is connected!", ready.user.name);
-
-    thread::spawn(move || {
-        let sleeptime = Duration::from_millis(90000);
-        loop {
-            let guild = match ready.guilds.first() {
-                None => {
-                    thread::sleep(sleeptime);
-                    continue
-                },
-                Some(x) => x
-            };
-            match guild.id().channels() {
-                Ok(chns) => {
-                    for key in chns.keys() {
-                        let n = match key.name() {
-                            Some(nn) => nn,
-                            None => { 
-                                continue  
+    fn ready(&self, _: Context, ready: Ready) {
+        println!("{} is connected!", ready.user.name);
+        update_rdy(ready);
+        if THR.load(Acquire) == false {
+            thread::spawn(move || {
+                let sleeptime = Duration::from_millis(90000);
+                loop {
+                    let rd : LockResult<RwLockReadGuard<_>> = RDY.read();
+                    match rd {
+                        Ok(r) => {
+                            let rr : RwLockReadGuard<_> = r;
+                            match &*rr {
+                                Some(rdee) => proc_ready(rdee),
+                                None => {}
                             }
-                        };
-                        if n == *CHANNEL {
-                            match key.messages(|_| GetMessages::default().limit(1)) {
-                                Ok(msgs) => {
-                                    if let Some(x) = msgs.last() {
-                                        if let Err(why) = x.delete() {
-                                            println!("Error deleting message: {:?}", why);        
-                                        }
-                                    }
-                                },
-                                Err(_) => {}
-                            }
-                            let now : DateTime<Local> = Local::now();
-                            let sqlres = get_users();
-                            let usercount : i32 = get_user_count();
-                            let mut toprint : String = format!("**{}** Users online as of {}:\n{}", usercount, now.format("%b/%d/%C %I:%M:%S %P %Z"), sqlres);
-                            if toprint.len() > 1900 {
-                                toprint = format!("There are currently too many users online to list, but I *can* tell you there are **{}** users online.", usercount);
-                            }
-                            if let Err(why) = key.say(toprint) {
-                                println!("Error sending message: {:?}", why);
-                            }
-                            break;
+                        },
+                        Err(_e) => {
+                            panic!("Error acquiring read lock!");
                         }
                     }
-                },
-                Err(_) => {
                     thread::sleep(sleeptime);
-                    continue    
+                }
+            });
+            THR.store(true, Release);
+        }
+    }
+}
+
+fn update_rdy(ready: Ready) {
+    let rdy : LockResult<RwLockWriteGuard<_>> = RDY.write();
+    match rdy {
+        Ok(rd) => {
+            let mut r : RwLockWriteGuard<_> = rd;
+            *r = Some(ready);
+        },
+        Err(_e) => {
+            panic!("Error acquiring write lock!");
+        }
+    }
+}
+
+fn proc_ready(ready: &Ready) {
+    let sleeptime = Duration::from_millis(90000);
+    let guild = match ready.guilds.first() {
+        None => {
+            thread::sleep(sleeptime);
+            return
+        },
+        Some(x) => x
+    };
+    match guild.id().channels() {
+        Ok(chns) => {
+            for key in chns.keys() {
+                let n = match key.name() {
+                    Some(nn) => nn,
+                    None => { 
+                        continue  
+                    }
+                };
+                if n == *CHANNEL {
+                    match key.messages(|_| GetMessages::default().limit(1)) {
+                        Ok(msgs) => {
+                            if let Some(x) = msgs.last() {
+                                if let Err(why) = x.delete() {
+                                    println!("Error deleting message: {:?}", why);        
+                                }
+                            }
+                        },
+                        Err(_) => {}
+                    }
+                    let now : DateTime<Local> = Local::now();
+                    let sqlres = get_users();
+                    let usercount : i32 = get_user_count();
+                    let mut toprint : String = format!("**{}** Users online as of {}:\n{}", usercount, now.format("%b/%d/%C %I:%M:%S %P %Z"), sqlres);
+                    if toprint.len() > 1900 {
+                        toprint = format!("There are currently too many users online to list, but I *can* tell you there are **{}** users online.", usercount);
+                    }
+                    if let Err(why) = key.say(toprint) {
+                        println!("Error sending message: {:?}", why);
+                    }
+                    break;
                 }
             }
-            
+        },
+        Err(_) => {
             thread::sleep(sleeptime);
         }
-    });
-  }
+    }
 }
 
 fn get_users() -> String {
