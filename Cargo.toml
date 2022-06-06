@@ -14,7 +14,7 @@ chrono = "0.4.6"
 tiberius = "0.3.2"
 futures = "0.1.26"
 futures-state-stream = "0.1.0"
-tokio = "0.1.19"
+tokio = "1.8.4"
 tokio-current-thread = "0.1.6"
 
 [profile.release]
